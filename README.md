@@ -16,7 +16,7 @@
 
 ```sh
 pip install -r ml/requirements.txt
-streamlit run ml/streamlit_app.py
+streamlit run ml/streamlit_app.py --server.address localhost
 ```
 
 첫 탭의 점검표에서 모델마다 동작 여부를 확인하고, 과제별 탭에서 직접 입력해 볼 수 있습니다.

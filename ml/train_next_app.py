@@ -18,7 +18,6 @@ from ml import devdesk_data, next_app
 
 ROOT = Path(__file__).resolve().parent
 SEED = 42
-mask_current = next_app.mask_current
 MIN_CI_GROUPS = 10  # fewer test sessions than this: no bootstrap interval (measured 2026-11-02: 1 session, width 0)
 
 
@@ -158,13 +157,13 @@ def main():
             callbacks=[lgb.early_stopping(30, verbose=False)])
     prob = np.zeros((len(test), n_apps))
     prob[:, clf.classes_] = clf.predict_proba(lgb_frame(test))
-    ranked["lightgbm"] = mask_current(prob, test["cur"].to_numpy())
+    ranked["lightgbm"] = next_app.mask_current(prob, test["cur"].to_numpy())
 
     import torch
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     model, gru_prob, val_loss = train_gru(parts, n_apps, n_users, a.epochs, dev)
-    ranked["gru"] = mask_current(gru_prob(test), test["cur"].to_numpy())
+    ranked["gru"] = next_app.mask_current(gru_prob(test), test["cur"].to_numpy())
     results = {k: scores(r, test) for k, r in ranked.items()}
     t = test["target"].to_numpy()
     results["gru"]["vs_ci95"] = {  # GRU minus each other model, same test rows
@@ -172,7 +171,7 @@ def main():
         for name, r in ranked.items() if name != "gru"
     }
     # the CI above is for one GRU (seed SEED); how much does another seed move it? (the table reports the first)
-    spread = [scores(mask_current(train_gru(parts, n_apps, n_users, a.epochs, dev, SEED + s)[1](test),
+    spread = [scores(next_app.mask_current(train_gru(parts, n_apps, n_users, a.epochs, dev, SEED + s)[1](test),
                                   test["cur"].to_numpy()), test) for s in range(1, a.seeds)]
     results["gru"]["seed_spread"] = {
         k: [min(r[k] for r in spread + [results["gru"]]), max(r[k] for r in spread + [results["gru"]])]

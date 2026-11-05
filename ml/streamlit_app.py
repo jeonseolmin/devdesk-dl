@@ -1,6 +1,6 @@
 """DevDesk 딥러닝 과제를 한 페이지로 묶은 Streamlit 앱: 과제별 결과 + 차트 + 모델 코드 + 리포트 + "자비스" 실시간 추론.
 
-Local:  uv run --group ml streamlit run ml/streamlit_app.py
+Local:  uv run --group ml streamlit run ml/streamlit_app.py --server.address localhost  (this PC only)
 Deploy: Streamlit Community Cloud, main file ml/streamlit_app.py (ml/requirements.txt beside it: no Qt, no torch).
 
 The results come from ml/reports/ (nothing is restated here), the charts from ml/reports/figures/. Every model runs
@@ -92,8 +92,8 @@ def read_wav(data):
 def score_stream(x, score, threshold):
     """(logit per 100 ms hop, seconds where it fired): the app listener's window and Trigger, over a clip. Only the
     clip is scored: silence added after it fired where the clip's noise stopped (measured), so the page asks for a
-    moment of recording after the word instead."""
-    x = np.concatenate([np.zeros(WIN, np.float32), x])
+    moment of recording after the word instead. The same goes for the start."""
+    x = np.pad(x, (WIN, 0), mode="reflect")  # the first windows hear the clip's own sound, no silent edge either
     trigger, scores, fired = Trigger(threshold, HOP / RATE), [], []
     for end in range(WIN + HOP, len(x) + 1, HOP):
         scores.append(score(x[end - WIN:end]))
@@ -151,7 +151,7 @@ def focus_seq(work_minutes, away, switches):
     seq = np.zeros((work_share.SEQ, len(names)), np.float32)
     seq[:, names.index("active")] = seq[:, names.index("present")] = 1
     seq[:, names.index("switches")] = np.log1p(switches)
-    seq[1:, names.index("gap")] = 0.1  # one minute apart, as the export scales it
+    seq[:, names.index("gap")] = 0.1  # one minute apart, as work_share.examples scales it
     start = work_share.SEQ - work_minutes
     seq[:start, names.index(f"cat_{away}")] = 1
     seq[start:, names.index("cat_ide")] = seq[start:, names.index("work")] = 1
@@ -171,7 +171,7 @@ def check_rows(model_dir=MODEL_DIR):
 
     def next_row():
         run, meta = load_demo("next_app", model_dir)
-        top, _ = next_predict(run, meta, [1, 2], 5, 14, 0)
+        top, _ = next_predict(run, meta, [1, 2], 5, 14, meta["users"][0])
         return f"시험 top-1 {meta['gru']['top1']:.3f}, top-3 {meta['gru']['top3']:.3f} · 예시 1순위 {meta['apps'][top[0][0]]}"
 
     def day_row():
@@ -182,7 +182,7 @@ def check_rows(model_dir=MODEL_DIR):
 
     def focus_row():
         run, meta = load_demo("focus", model_dir)
-        minutes = focus_predict(run, meta, focus_seq(15, "browser", 1), 0)
+        minutes = focus_predict(run, meta, focus_seq(15, "browser", 1), min(int(u) for u in meta["user_mean"]))
         return f"시험 MAE {meta['mae_gru']:.2f}분 (사람별 평균 {meta['mae_user_mean']:.2f}분) · 예시 {minutes:.1f}분"
 
     rows = []
@@ -193,6 +193,17 @@ def check_rows(model_dir=MODEL_DIR):
         except Exception as e:  # fail-open: a row says what is wrong, without the exception's text
             rows.append({"모델": name, "상태": "❌ 사용 불가", "확인 내용": type(e).__name__})
     return rows
+
+
+def task_text(st, md, bullets, figures, codes):
+    for name in bullets:
+        st.markdown(bullet(md, name))
+    for fig in figures:
+        st.image(str(REPORTS / "figures" / f"{fig}.png"))
+    with st.expander("모델 코드"):
+        for path, name in codes:
+            st.caption(f"{path} · {name}")
+            st.code(code_of(path, name), language="python")
 
 
 def panel(demo, st):
@@ -227,7 +238,7 @@ def next_demo(st, model_dir=MODEL_DIR):
         picks.append(col.selectbox(label, (none, *names[1:]), index=(0, 2, 1, 2)[i], key=f"next_{i}"))
     chain = visit_chain([None if p == none else names.index(p) for p in picks])
     left, mid, right = st.columns(3)
-    user = left.selectbox("사용자", range(meta["users"]), format_func=lambda u: f"사용자 {u}", key="next_user")
+    user = left.selectbox("사용자", meta["users"], format_func=lambda u: f"사용자 {u}", key="next_user")
     minutes = mid.slider("앱마다 머문 시간 (분)", 1, 60, 5, key="next_minutes")
     hour = right.slider("시각", 0, 23, 14, key="next_hour")
     if picks[-1] == none:  # an earlier box must not silently become the current app
@@ -248,7 +259,8 @@ def day_demo(st, model_dir=MODEL_DIR):
         return
     run, meta = loaded
     st.caption(f"재학습 시험 AUC: 밤에 게임 {meta['auc']['night_game']:.2f}, 시간대 밀림 {meta['auc']['shift']:.2f}, "
-               f"다른 사람의 하루 {meta['auc']['swapped']:.2f}. 학습에 쓰지 않은 실제 하루를 씁니다.")
+               f"다른 사람의 하루 {meta['auc']['swapped']:.2f}. 학습에 쓰지 않은 실제 하루를 씁니다. 판정 기준은 사용자별로 "
+               "학습 마지막 날들에서 정해 날 수가 적습니다. 그래서 일부 사용자는 손대지 않은 하루도 '평소와 다름'으로 나옵니다.")
     users = sorted(int(u) for u in meta["days"])
     left, right = st.columns(2)
     user = left.selectbox("사용자", users, format_func=lambda u: f"사용자 {u}", key="day_user")
@@ -333,14 +345,7 @@ def main():
     demos = (wake_demo, next_demo, day_demo, focus_demo)  # one per TASKS row
     for tab, (_, bullets, figures, codes), demo in zip(task_tabs, TASKS, demos, strict=True):
         with tab:
-            for name in bullets:
-                st.markdown(bullet(md, name))
-            for fig in figures:
-                st.image(str(REPORTS / "figures" / f"{fig}.png"))
-            with st.expander("모델 코드"):
-                for path, name in codes:
-                    st.caption(f"{path} · {name}")
-                    st.code(code_of(path, name), language="python")
+            panel(lambda s, b=bullets, f=figures, c=codes: task_text(s, md, b, f, c), st)
             st.fragment(panel)(demo, st)  # using one panel reruns only that panel
     learned.markdown(section(md, 3))
     next_steps.markdown(section(md, 4))

@@ -64,12 +64,13 @@ def next_app_demo(df, tz, dev):
     model, prob, _ = train_next_app.train_gru(parts, n_apps, n_users, 60, dev)
     test, markov = parts["test"], next_app.Markov().fit(parts["train"])
     fallback = [a for a, _ in markov.all.most_common()]
-    ranked = {"gru": train_next_app.mask_current(prob(test), test["cur"].to_numpy()),
+    ranked = {"gru": next_app.mask_current(prob(test), test["cur"].to_numpy()),
               "back": next_app.rank_back(test, fallback)}
     scores = {k: train_next_app.scores(r, test) for k, r in ranked.items()}
 
     model = model.cpu().eval()
-    rows = test.groupby("device_id").head(3)  # every user the page offers, one-visit chains included
+    # every user the page offers, and one-visit chains, which the page sends when only "지금 앱" is picked
+    rows = pd.concat([test.groupby("device_id").head(3), test[test["hist"].map(len) == 1].groupby("device_id").head(1)])
     examples = []
     for hist, m, hr, u in zip(rows["hist"], rows["hist_minutes"], rows["hist_hour"], rows["device_id"], strict=True):
         num = next_app.visit_features(m, hr)
@@ -80,7 +81,7 @@ def next_app_demo(df, tz, dev):
 
     digest = export(NextGraph(model), examples, "demo_next_app", ["apps", "num", "users"],
                     {"apps": {1: "visits"}, "num": {1: "visits"}}, want)
-    return {"sha256": digest, "apps": ["(기타)", *voc], "fallback": [int(a) for a in fallback], "users": n_users,
+    return {"sha256": digest, "apps": ["(기타)", *voc], "fallback": [int(a) for a in fallback], "users": sorted(int(u) for u in parts["train"]["device_id"].unique()),
             "gru": {k: scores["gru"][k] for k in ("top1", "top3")}, "back": {k: scores["back"][k] for k in ("top1", "top3")}}
 
 
@@ -93,16 +94,22 @@ def day_demo(df, tz, dev):
     auc = train_day_anomaly.aucs(score, sets)
     X, U = sets["normal"]
     errors = score(X, U)
-    days, p95 = {}, {}  # one held-out day per user: that user's (lower) median error, so below their limit
+    days = {}  # one held-out day per user: that user's median error, neither best nor worst
     for u in np.unique(U):
         idx = np.flatnonzero(U == u)
         days[int(u)] = np.round(X[idx[np.argsort(errors[idx])[(len(idx) - 1) // 2]]], 4).tolist()
-        p95[int(u)] = float(np.percentile(errors[idx], 95))  # the model asks "unlike THIS user", so must the verdict
+
+    # the verdict's limit per user ("unlike THIS user"), from days the test never sees: the same last train days that
+    # stopped the training (at least the last one); test only measures
+    by_user = train.groupby("device_id")
+    late = train[(by_user.cumcount() / by_user["day"].transform("size") >= 0.85) | (by_user.cumcount(ascending=False) == 0)]
+    limits = {int(u): float(np.percentile(score(np.stack(g["x"]), g["device_id"].to_numpy()), 95))
+              for u, g in late.groupby("device_id")}
 
     model = score.model.cpu().eval()
     examples = [(torch.tensor(X[i:i + 1], dtype=torch.float32), torch.tensor(U[i:i + 1])) for i in range(len(X))]
     digest = export(model, examples, "demo_day", ["x", "user"], None, lambda x, u: model(x, u))
-    return {"sha256": digest, "days": days, "auc": auc, "normal_p95": p95}
+    return {"sha256": digest, "days": days, "auc": auc, "normal_p95": limits}
 
 
 def focus_demo(df, tz, dev):
