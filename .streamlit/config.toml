@@ -1,0 +1,5 @@
+[server]
+maxUploadSize = 25  # MB; every upload widget, enforced by the server (the default is 200)
+
+[browser]
+gatherUsageStats = false

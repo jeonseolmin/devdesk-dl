@@ -1,0 +1,5 @@
+__pycache__/
+.venv/
+ml/data/
+ml/models/wake.*
+ml/models/*.pt
