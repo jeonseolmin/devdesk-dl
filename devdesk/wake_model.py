@@ -31,14 +31,13 @@ def _stft_consts(np, padded_len):
     return idx, window
 
 
-def checked_session(path, sha256):
-    """An onnxruntime session on one core over the file's bytes, if they hash to sha256 (its json names the model).
-    Raises when it is missing or from another export."""
+def checked_session(model, sha256):
+    """An onnxruntime session on one core over the model's bytes, if they hash to sha256 (its json names the model).
+    Raises when they come from another export."""
     import onnxruntime as ort
 
-    model = Path(path).read_bytes()
     if hashlib.sha256(model).hexdigest() != sha256:  # missing = an older export: re-run it
-        raise ValueError(f"the json does not belong to this {Path(path).name} (re-run its export script)")
+        raise ValueError("the json does not belong to this model (re-run its export script)")
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = opts.inter_op_num_threads = 1  # ~2-3 ms per window on one core
     return ort.InferenceSession(model, opts, providers=["CPUExecutionProvider"])  # the bytes the hash checked
@@ -47,11 +46,16 @@ def checked_session(path, sha256):
 def load_model(model_dir=MODEL_DIR):
     """(score(window) -> logit, threshold). Raises when a file or package is missing or broken, or when wake.json
     belongs to another export than wake.onnx."""
+    return load_pair((Path(model_dir) / "wake.onnx").read_bytes(), (Path(model_dir) / "wake.json").read_text(encoding="utf-8"))
+
+
+def load_pair(model, meta_text):
+    """load_model over the two files' contents, from memory (the deployed page has them in its secrets)."""
     import numpy as np
 
-    meta = json.loads((Path(model_dir) / "wake.json").read_text(encoding="utf-8"))
+    meta = json.loads(meta_text)
     threshold = float(meta["threshold_logit"])
-    session = checked_session(Path(model_dir) / "wake.onnx", meta.get("onnx_sha256"))
+    session = checked_session(model, meta.get("onnx_sha256"))
     name = session.get_inputs()[0].name
 
     def score(window):

@@ -1,5 +1,6 @@
 __pycache__/
 .venv/
 ml/data/
+.streamlit/secrets.toml
 ml/models/wake.*
 ml/models/*.pt

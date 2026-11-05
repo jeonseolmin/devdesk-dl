@@ -7,7 +7,7 @@ The results come from ml/reports/ (nothing is restated here), the charts from ml
 here, each panel beside the test numbers of its own retraining (demos.json): the overview's table checks each one, each task's tab takes your input. The files come from
 ml/scripts/export_wake.py and ml/scripts/export_demos.py. A missing or broken one turns off only its own panel
 (a Cloud deployment has what git has, the demo_* models; wake.onnx, trained on the user's voice, is never in git: there
-it comes from the app's Streamlit secrets, see wake_dir).
+it comes from the app's Streamlit secrets, see load_wake).
 A clip goes from the browser to the machine running this page, by the user's own click, and stays in memory there:
 never written or logged. On Community Cloud that machine is not the user's; the page says so.
 """
@@ -17,7 +17,6 @@ import io
 import json
 import re
 import sys
-import tempfile
 import textwrap
 import wave
 from pathlib import Path
@@ -30,7 +29,7 @@ if str(ROOT) not in sys.path:  # `streamlit run` puts only ml/ on the path; the 
     sys.path.insert(0, str(ROOT))
 
 from devdesk.wake import HOP, RATE, WIN, Trigger  # noqa: E402
-from devdesk.wake_model import MODEL_DIR, checked_session, load_model  # noqa: E402
+from devdesk.wake_model import MODEL_DIR, checked_session, load_model, load_pair  # noqa: E402
 from ml import day_anomaly, next_app, work_share  # noqa: E402
 
 REPORTS = ROOT / "ml" / "reports"
@@ -109,7 +108,7 @@ def load_demo(key, model_dir=MODEL_DIR):
     """(run(**inputs) -> output array, this model's part of demos.json), from ml/scripts/export_demos.py. Raises when a
     file is missing or the pair does not match."""
     meta = json.loads((Path(model_dir) / "demos.json").read_text("utf-8"))[key]
-    session = checked_session(Path(model_dir) / f"demo_{key}.onnx", meta["sha256"])
+    session = checked_session((Path(model_dir) / f"demo_{key}.onnx").read_bytes(), meta["sha256"])
     return (lambda **inputs: session.run(None, inputs)[0]), meta
 
 
@@ -166,10 +165,11 @@ def focus_predict(run, meta, seq, user):
     return float(run(seq=seq[None], user=np.array([user], np.int64))[0]) * meta["horizon"]
 
 
-def check_rows(model_dir=MODEL_DIR, wake=None):
-    """One row per model: does it load and answer one input here? Any failure is that model's row, never the page's."""
+def check_rows(model_dir=MODEL_DIR, _wake=None):
+    """One row per model: does it load and answer one input here? Any failure is that model's row, never the page's.
+    _wake: how this page loads the wake model (the underscore keeps it out of cache_data's key)."""
     def wake_row():
-        score, threshold = load_model(wake or model_dir)
+        score, threshold = _wake() if _wake else load_model(model_dir)
         return f"점수 {score(np.zeros(WIN, np.float32)):.2f}, 기준 {threshold:.2f}"
 
     def next_row():
@@ -300,32 +300,31 @@ def focus_demo(st, model_dir=MODEL_DIR):
     right.metric("비교: 이 사용자의 평균", f"{meta['user_mean'][str(user)] * meta['horizon']:.1f}분")
 
 
-def write_wake_secret(onnx_b64, meta):
-    """The wake pair from secrets → a private temp folder for load_model, which checks that the two belong together."""
-    folder = Path(tempfile.mkdtemp(prefix="wake-"))
-    (folder / "wake.onnx").write_bytes(base64.b64decode(onnx_b64, validate=True))
-    (folder / "wake.json").write_text(meta, "utf-8")
-    return str(folder)
+def secret_pair(onnx_b64, meta):
+    """The wake model from the app's secrets, in memory only: it is trained on the user's voice."""
+    return load_pair(base64.b64decode("".join(onnx_b64.split()), validate=True), meta)
 
 
-def wake_dir(st, model_dir=MODEL_DIR):
-    """Where the wake model is: the local file, else the app's secrets (wake_onnx_b64, wake_json). Any problem there
-    leaves model_dir, so the panel says the model is missing."""
-    try:
-        if not (Path(model_dir) / "wake.onnx").exists() and "wake_onnx_b64" in st.secrets:
-            return st.cache_resource(write_wake_secret)(st.secrets["wake_onnx_b64"], st.secrets["wake_json"])
-    except Exception:  # no secrets file (st.secrets raises), or a broken value
-        pass
-    return str(model_dir)
+def load_wake(st, model_dir=MODEL_DIR):
+    """(score, threshold): the local files, else the app's secrets (wake_onnx_b64, wake_json). A broken secret raises,
+    so its type name is what the panel and the table show."""
+    if not (Path(model_dir) / "wake.onnx").exists():
+        try:
+            found = "wake_onnx_b64" in st.secrets
+        except Exception:  # no secrets file at all: st.secrets raises
+            found = False
+        if found:
+            return st.cache_resource(secret_pair)(st.secrets["wake_onnx_b64"], st.secrets["wake_json"])
+    return st.cache_resource(load_model)(str(model_dir))
 
 
 def wake_demo(st, model_dir=MODEL_DIR):
     st.subheader("직접 해 보기: \"자비스\"")
     try:
-        score, threshold = st.cache_resource(load_model)(wake_dir(st, model_dir))
+        score, threshold = load_wake(st, model_dir)
     except Exception as e:  # fail-open: only the demo turns off
         st.info(f"웨이크워드 모델을 쓸 수 없어 데모를 끕니다 ({type(e).__name__}). "
-                "`ml/models/wake.onnx`와 `wake.json`이 필요합니다.")
+                "`ml/models/wake.onnx`와 `wake.json`, 또는 배포본의 Secrets가 필요합니다.")
         return
     st.caption("앱에 들어간 CNN(ONNX)이 CPU에서 100 ms마다 점수를 냅니다. 녹음이나 파일은 이 페이지를 실행하는 서버(배포본은 Streamlit)로 "
                "전송되어 메모리에서만 처리되며, 파일이나 로그로 남기지 않습니다. 학습에 쓴 실제 목소리는 한 사람뿐이라 "
@@ -362,7 +361,8 @@ def main():
     overview, *task_tabs, learned, next_steps, reports = st.tabs(["개요", *(t[0] for t in TASKS), "배운 것", "다음", "전체 리포트"])
     overview.markdown(section(md, 1))
     overview.subheader("모델 점검표")
-    overview.table(st.cache_data(ttl=60)(check_rows)(MODEL_DIR, wake_dir(st)))  # not for good: a model may appear or break
+    # not for good: a model may appear or break
+    overview.table(st.cache_data(ttl=60)(check_rows)(MODEL_DIR, lambda: load_wake(st)))
     overview.caption("활동 모델은 BEHACOM(CC BY 4.0, DOI 10.17632/cg4br62535.2)으로 시드 42로 다시 학습했습니다. 각 과제 탭에서 직접 입력해 볼 수 있습니다.")
     demos = (wake_demo, next_demo, day_demo, focus_demo)  # one per TASKS row
     for tab, (_, bullets, figures, codes), demo in zip(task_tabs, TASKS, demos, strict=True):
