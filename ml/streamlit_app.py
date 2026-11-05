@@ -14,6 +14,7 @@ never written or logged. On Community Cloud that machine is not the user's; the 
 import ast
 import base64
 import io
+import itertools
 import json
 import re
 import sys
@@ -37,6 +38,25 @@ MAX_S = 30  # longest clip: a public deployment must not score for minutes on on
 MAX_RATE, MAX_CHANNELS = 192000, 2  # with MAX_S: at most 23 MB of samples, whatever the header claims
 # The upload itself is capped for every widget by .streamlit/config.toml (server.maxUploadSize).
 REPORT_FILES = ("wake-word.md", "activity-dl.md", "ml1-behacom.md", "datasets.md")
+CHART_COLORS = ("#2a78d6", "#eb6834")  # the report charts' first two slots (ml/reports/figures.py), validated together
+PAGE_STYLE = """<style>
+[data-testid="stMainBlockContainer"] { max-width: 1320px; padding-top: 4rem; }
+[data-testid="stImage"] img { border: 1px solid #e4e3df; border-radius: 10px; }
+button[data-baseweb="tab"] p { font-size: 0.95rem; font-weight: 600; }
+.dd-hero { background: linear-gradient(120deg, #05070d 0%, #10141e 70%, #1a2030 100%); border: 1px solid #2a3348;
+  border-radius: 16px; padding: 2rem 2.25rem; margin-bottom: 0.75rem; color: #c8d0e0; }
+.dd-hero .dd-eyebrow { color: #6fa3bf; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.14em; margin: 0 0 0.5rem; }
+.dd-hero h1 { color: #ffffff; font-size: 2.1rem; font-weight: 700; line-height: 1.25; margin: 0 0 0.6rem; padding: 0; }
+.dd-hero p { font-size: 1.02rem; line-height: 1.6; margin: 0; }
+.dd-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.1rem; }
+.dd-chips span { border: 1px solid #2a3348; background: #151a26; border-radius: 999px; font-size: 0.85rem; padding: 0.25rem 0.8rem; }
+</style>"""
+PAGE_HERO = """<div class="dd-hero">
+<p class="dd-eyebrow">DEEP LEARNING PROJECT</p>
+<h1>DevDesk에 딥러닝 붙이기</h1>
+<p>개발자 데스크톱 앱 DevDesk에 붙이려고 만든 모델 네 가지를 결과, 차트, 코드로 살펴보고 직접 실행해 봅니다.</p>
+<div class="dd-chips"><span>웨이크워드 CNN</span><span>다음 앱 GRU</span><span>하루 이상 오토인코더</span><span>집중 이탈 GRU</span></div>
+</div>"""
 TASKS = (  # tab, bullets of the report's section 2, charts, model code (file, class or function)
     ("웨이크워드", ("웨이크워드", "비슷한 단어", "실제 목소리", "재현성"),
      ("wake_data_size", "wake_confuse", "wake_real"), (("ml/wake.py", "WakeCNN"), ("ml/wake.py", "WakeHead"))),
@@ -138,6 +158,11 @@ def day_check(run, day, user):
     return recon, float(((recon - x) ** 2).mean())
 
 
+def hourly_use(day):
+    """A day profile → the share of each hour with any app in front (the app categories' sum; the last channel is input)."""
+    return np.asarray(day).reshape(24, -1)[:, :-1].sum(axis=1)
+
+
 def day_variant(days, user, kind):
     """The user's held-out day as it is, with an injected anomaly, or another user's day."""
     day = np.array(days[str(user)], np.float64)
@@ -199,14 +224,29 @@ def check_rows(model_dir=MODEL_DIR, _wake=None):
 
 
 def task_text(st, md, bullets, figures, codes):
-    for name in bullets:
-        st.markdown(bullet(md, name))
-    for fig in figures:
-        st.image(str(REPORTS / "figures" / f"{fig}.png"))
+    """Each result beside its chart (TASKS lists them in the same order; a result may have none)."""
+    st.subheader("결과")
+    for name, fig in itertools.zip_longest(bullets, figures):
+        text = bullet(md, name)
+        if fig is None:
+            st.markdown(text)
+            continue
+        left, right = st.columns((2, 3), gap="large")
+        left.markdown(text)
+        right.image(str(REPORTS / "figures" / f"{fig}.png"))
     with st.expander("모델 코드"):
         for path, name in codes:
             st.caption(f"{path} · {name}")
             st.code(code_of(path, name), language="python")
+
+
+def check_cards(st, rows):
+    """The check table as one card per model: icon and label, never colour alone."""
+    for col, row in zip(st.columns(len(rows)), rows, strict=True):
+        card = col.container(border=True, height="stretch")
+        card.markdown(f"**{row['모델']}**")
+        card.markdown(row["상태"])
+        card.caption(row["확인 내용"])
 
 
 def panel(demo, st):
@@ -275,10 +315,8 @@ def day_demo(st, model_dir=MODEL_DIR):
     limit = meta["normal_p95"][str(user)]
     left.metric(f"복원 오차 (이 사용자의 평소 95 %: {limit:.4f} 이하)", f"{error:.4f}")
     right.metric("판정", "평소와 다름" if error > limit else "평소 범위")
-    apps = list(day_anomaly.CHANNELS[:-1])
-    for col, title, values in ((left, "이 하루 (시간별 앱 비율)", x), (right, "모델이 복원한 하루", recon)):
-        col.caption(title)
-        col.bar_chart(pd.DataFrame(np.asarray(values).reshape(24, -1)[:, :len(apps)], columns=apps))
+    st.line_chart(pd.DataFrame({"이 하루": hourly_use(x), "모델이 복원한 하루": hourly_use(recon)}), color=list(CHART_COLORS),
+                  x_label="시각", y_label="그 시간에 PC를 쓴 비율")
 
 
 def focus_demo(st, model_dir=MODEL_DIR):
@@ -344,8 +382,9 @@ def wake_demo(st, model_dir=MODEL_DIR):
     left, right = st.columns(2)
     left.metric(f"가장 높은 점수 (logit, 기준 {threshold:.2f})", f"{max(scores):.2f}")
     right.metric("감지 횟수", len(fired))
-    st.line_chart({"점수": scores, "기준값": [threshold] * len(scores)})
-    st.caption("가로축: 100 ms 단위 구간 번호")
+    seconds = (np.arange(len(scores)) + 1) * HOP / RATE
+    st.line_chart(pd.DataFrame({"점수": scores, "기준값": [threshold] * len(scores)}, index=seconds), color=list(CHART_COLORS),
+                  x_label="초", y_label="점수 (logit)")
     if fired:
         st.success("감지: " + ", ".join(f"{s:.1f}초" for s in fired))
     else:
@@ -356,19 +395,23 @@ def main():
     import streamlit as st
 
     st.set_page_config(page_title="DevDesk 딥러닝", layout="wide")
-    st.title("DevDesk에 딥러닝 붙이기")
+    st.html(PAGE_STYLE)
+    st.html(PAGE_HERO)
     md = (REPORTS / "presentation.md").read_text("utf-8")
     overview, *task_tabs, learned, next_steps, reports = st.tabs(["개요", *(t[0] for t in TASKS), "배운 것", "다음", "전체 리포트"])
-    overview.markdown(section(md, 1))
-    overview.subheader("모델 점검표")
-    # not for good: a model may appear or break
-    overview.table(st.cache_data(ttl=60)(check_rows)(MODEL_DIR, lambda: load_wake(st)))
-    overview.caption("활동 모델은 BEHACOM(CC BY 4.0, DOI 10.17632/cg4br62535.2)으로 시드 42로 다시 학습했습니다. 각 과제 탭에서 직접 입력해 볼 수 있습니다.")
+    with overview:
+        st.subheader("모델 점검표")
+        # not for good: a model may appear or break
+        check_cards(st, st.cache_data(ttl=60)(check_rows)(MODEL_DIR, lambda: load_wake(st)))
+        st.caption("활동 모델은 BEHACOM(CC BY 4.0, DOI 10.17632/cg4br62535.2)으로 시드 42로 다시 학습했습니다. 각 과제 탭에서 직접 입력해 볼 수 있습니다.")
+        st.subheader("무엇을 했나")
+        st.markdown(section(md, 1))
     demos = (wake_demo, next_demo, day_demo, focus_demo)  # one per TASKS row
     for tab, (_, bullets, figures, codes), demo in zip(task_tabs, TASKS, demos, strict=True):
         with tab:
+            with st.container(border=True):
+                st.fragment(panel)(demo, st)  # using one panel reruns only that panel
             panel(lambda s, b=bullets, f=figures, c=codes: task_text(s, md, b, f, c), st)
-            st.fragment(panel)(demo, st)  # using one panel reruns only that panel
     learned.markdown(section(md, 3))
     next_steps.markdown(section(md, 4))
     with reports:
