@@ -6,15 +6,18 @@ Deploy: Streamlit Community Cloud, main file ml/streamlit_app.py (ml/requirement
 The results come from ml/reports/ (nothing is restated here), the charts from ml/reports/figures/. Every model runs
 here, each panel beside the test numbers of its own retraining (demos.json): the overview's table checks each one, each task's tab takes your input. The files come from
 ml/scripts/export_wake.py and ml/scripts/export_demos.py. A missing or broken one turns off only its own panel
-(a Cloud deployment has only what git has: the demo_* models, not wake.onnx, which is trained on the user's voice).
+(a Cloud deployment has what git has, the demo_* models; wake.onnx, trained on the user's voice, is never in git: there
+it comes from the app's Streamlit secrets, see wake_dir).
 A clip goes from the browser to the machine running this page, by the user's own click, and stays in memory there:
 never written or logged. On Community Cloud that machine is not the user's; the page says so.
 """
 import ast
+import base64
 import io
 import json
 import re
 import sys
+import tempfile
 import textwrap
 import wave
 from pathlib import Path
@@ -163,10 +166,10 @@ def focus_predict(run, meta, seq, user):
     return float(run(seq=seq[None], user=np.array([user], np.int64))[0]) * meta["horizon"]
 
 
-def check_rows(model_dir=MODEL_DIR):
+def check_rows(model_dir=MODEL_DIR, wake=None):
     """One row per model: does it load and answer one input here? Any failure is that model's row, never the page's."""
     def wake_row():
-        score, threshold = load_model(model_dir)
+        score, threshold = load_model(wake or model_dir)
         return f"점수 {score(np.zeros(WIN, np.float32)):.2f}, 기준 {threshold:.2f}"
 
     def next_row():
@@ -297,15 +300,34 @@ def focus_demo(st, model_dir=MODEL_DIR):
     right.metric("비교: 이 사용자의 평균", f"{meta['user_mean'][str(user)] * meta['horizon']:.1f}분")
 
 
+def write_wake_secret(onnx_b64, meta):
+    """The wake pair from secrets → a private temp folder for load_model, which checks that the two belong together."""
+    folder = Path(tempfile.mkdtemp(prefix="wake-"))
+    (folder / "wake.onnx").write_bytes(base64.b64decode(onnx_b64, validate=True))
+    (folder / "wake.json").write_text(meta, "utf-8")
+    return str(folder)
+
+
+def wake_dir(st, model_dir=MODEL_DIR):
+    """Where the wake model is: the local file, else the app's secrets (wake_onnx_b64, wake_json). Any problem there
+    leaves model_dir, so the panel says the model is missing."""
+    try:
+        if not (Path(model_dir) / "wake.onnx").exists() and "wake_onnx_b64" in st.secrets:
+            return st.cache_resource(write_wake_secret)(st.secrets["wake_onnx_b64"], st.secrets["wake_json"])
+    except Exception:  # no secrets file (st.secrets raises), or a broken value
+        pass
+    return str(model_dir)
+
+
 def wake_demo(st, model_dir=MODEL_DIR):
     st.subheader("직접 해 보기: \"자비스\"")
     try:
-        score, threshold = st.cache_resource(load_model)(str(model_dir))
+        score, threshold = st.cache_resource(load_model)(wake_dir(st, model_dir))
     except Exception as e:  # fail-open: only the demo turns off
         st.info(f"웨이크워드 모델을 쓸 수 없어 데모를 끕니다 ({type(e).__name__}). "
                 "`ml/models/wake.onnx`와 `wake.json`이 필요합니다.")
         return
-    st.caption("앱에 들어간 CNN(ONNX)이 CPU에서 100 ms마다 점수를 냅니다. 녹음이나 파일은 이 페이지를 실행하는 서버로 "
+    st.caption("앱에 들어간 CNN(ONNX)이 CPU에서 100 ms마다 점수를 냅니다. 녹음이나 파일은 이 페이지를 실행하는 서버(배포본은 Streamlit)로 "
                "전송되어 메모리에서만 처리되며, 파일이나 로그로 남기지 않습니다. 학습에 쓴 실제 목소리는 한 사람뿐이라 "
                "다른 목소리에서는 잘 안 잡힐 수 있습니다. 말한 뒤 1초쯤 더 녹음하세요. WAV는 16 kHz가 가장 정확합니다.")
     if st.radio("입력", ("마이크로 녹음", "WAV 올리기"), horizontal=True) == "마이크로 녹음":  # one source: never a stale one
@@ -340,7 +362,7 @@ def main():
     overview, *task_tabs, learned, next_steps, reports = st.tabs(["개요", *(t[0] for t in TASKS), "배운 것", "다음", "전체 리포트"])
     overview.markdown(section(md, 1))
     overview.subheader("모델 점검표")
-    overview.table(st.cache_data(ttl=60)(check_rows)())  # not for good: a model that appears or breaks must show
+    overview.table(st.cache_data(ttl=60)(check_rows)(MODEL_DIR, wake_dir(st)))  # not for good: a model may appear or break
     overview.caption("활동 모델은 BEHACOM(CC BY 4.0, DOI 10.17632/cg4br62535.2)으로 시드 42로 다시 학습했습니다. 각 과제 탭에서 직접 입력해 볼 수 있습니다.")
     demos = (wake_demo, next_demo, day_demo, focus_demo)  # one per TASKS row
     for tab, (_, bullets, figures, codes), demo in zip(task_tabs, TASKS, demos, strict=True):
