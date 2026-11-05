@@ -160,7 +160,7 @@ def day_check(run, day, user):
 
 def hourly_use(day):
     """A day profile → the share of each hour with any app in front (the app categories' sum; the last channel is input)."""
-    return np.asarray(day).reshape(24, -1)[:, :-1].sum(axis=1)
+    return np.clip(np.asarray(day).reshape(24, -1)[:, :-1].sum(axis=1), 0, 1)  # the decoder's channels are independent
 
 
 def day_variant(days, user, kind):
@@ -174,15 +174,12 @@ def day_variant(days, user, kind):
 
 def focus_seq(work_minutes, away, switches):
     """The last SEQ minutes as the forecast sees them: `away` first, then work_minutes of IDE up to now, with input."""
-    names = work_share.seq_names(False)
-    seq = np.zeros((work_share.SEQ, len(names)), np.float32)
-    seq[:, names.index("active")] = seq[:, names.index("present")] = 1
-    seq[:, names.index("switches")] = np.log1p(switches)
-    seq[:, names.index("gap")] = 0.1  # one minute apart, as work_share.examples scales it
     start = work_share.SEQ - work_minutes
-    seq[:start, names.index(f"cat_{away}")] = 1
-    seq[start:, names.index("cat_ide")] = seq[start:, names.index("work")] = 1
-    return seq
+    rows = pd.DataFrame({"work": [i >= start for i in range(work_share.SEQ)], "idle_sec": 0, "switch_count": switches,
+                         "app_category": [away if i < start else "ide" for i in range(work_share.SEQ)]})
+    # the model's own row columns, then present and gap, as work_share.examples builds them
+    return np.column_stack([work_share.row_inputs(rows, False), np.ones(work_share.SEQ),
+                            np.full(work_share.SEQ, work_share.scale_gap(1))]).astype(np.float32)
 
 
 def focus_predict(run, meta, seq, user):
@@ -349,7 +346,7 @@ def load_wake(st, model_dir=MODEL_DIR):
     if not (Path(model_dir) / "wake.onnx").exists():
         try:
             found = "wake_onnx_b64" in st.secrets
-        except Exception:  # no secrets file at all: st.secrets raises
+        except FileNotFoundError:  # no secrets file at all (StreamlitSecretNotFoundError is one)
             found = False
         if found:
             return st.cache_resource(secret_pair)(st.secrets["wake_onnx_b64"], st.secrets["wake_json"])
@@ -397,7 +394,9 @@ def main():
     st.set_page_config(page_title="DevDesk 딥러닝", layout="wide")
     st.html(PAGE_STYLE)
     st.html(PAGE_HERO)
-    md = (REPORTS / "presentation.md").read_text("utf-8")
+    def md():
+        return (REPORTS / "presentation.md").read_text("utf-8")
+
     overview, *task_tabs, learned, next_steps, reports = st.tabs(["개요", *(t[0] for t in TASKS), "배운 것", "다음", "전체 리포트"])
     with overview:
         st.subheader("모델 점검표")
@@ -405,17 +404,20 @@ def main():
         check_cards(st, st.cache_data(ttl=60)(check_rows)(MODEL_DIR, lambda: load_wake(st)))
         st.caption("활동 모델은 BEHACOM(CC BY 4.0, DOI 10.17632/cg4br62535.2)으로 시드 42로 다시 학습했습니다. 각 과제 탭에서 직접 입력해 볼 수 있습니다.")
         st.subheader("무엇을 했나")
-        st.markdown(section(md, 1))
+        panel(lambda s: s.markdown(section(md(), 1)), st)
     demos = (wake_demo, next_demo, day_demo, focus_demo)  # one per TASKS row
     for tab, (_, bullets, figures, codes), demo in zip(task_tabs, TASKS, demos, strict=True):
         with tab:
             with st.container(border=True):
                 st.fragment(panel)(demo, st)  # using one panel reruns only that panel
-            panel(lambda s, b=bullets, f=figures, c=codes: task_text(s, md, b, f, c), st)
-    learned.markdown(section(md, 3))
-    next_steps.markdown(section(md, 4))
+            panel(lambda s, b=bullets, f=figures, c=codes: task_text(s, md(), b, f, c), st)  # bound here: ruff B023
+    panel(lambda s: learned.markdown(section(md(), 3)), st)
+    panel(lambda s: next_steps.markdown(section(md(), 4)), st)
     with reports:
-        st.fragment(lambda: st.markdown((REPORTS / st.selectbox("리포트", REPORT_FILES)).read_text("utf-8")))()  # no re-scoring of a held clip
+        def report(s):
+            s.markdown((REPORTS / s.selectbox("리포트", REPORT_FILES)).read_text("utf-8"))
+
+        st.fragment(panel)(report, st)  # no re-scoring of a held clip
 
 
 if __name__ == "__main__":

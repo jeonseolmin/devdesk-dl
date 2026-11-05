@@ -71,6 +71,11 @@ def away_runs(df: pd.DataFrame):
     return np.array(lengths, dtype=int), no_return
 
 
+def scale_gap(gap):
+    """Minutes since the row before → the sequence's gap column."""
+    return np.clip(gap, 0, 10) / 10
+
+
 def row_inputs(d: pd.DataFrame, extras: bool) -> np.ndarray:
     """Per-row numbers the features summarise: work, active, log switches, one-hot category [, extras]."""
     cols = [d["work"].to_numpy(float), (d["idle_sec"] < ACTIVE_SEC).to_numpy(float),
@@ -129,7 +134,7 @@ def examples(d: pd.DataFrame, horizon: int, tz: str, extras: bool) -> pd.DataFra
             seq = np.zeros((SEQ, len(seq_names(extras))), np.float32)  # row inputs + present flag + gap
             seq[SEQ - (i + 1 - lo):, :-2] = x[lo : i + 1]
             seq[SEQ - (i + 1 - lo):, -2] = 1
-            seq[SEQ - (i + 1 - lo):, -1] = np.clip(gap[lo : i + 1], 0, 10) / 10
+            seq[SEQ - (i + 1 - lo):, -1] = scale_gap(gap[lo : i + 1])
             row["seq"] = seq
             out.append(row)
     # no decision point (a short --devdesk export): still the columns callers read
